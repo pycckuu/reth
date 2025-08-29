@@ -745,7 +745,19 @@ where
         let new_head_number = canonical_header.number();
         let new_head_hash = canonical_header.hash();
 
-        // Update tree state with the new canonical head
+        // CRITICAL: First verify the block exists before updating any state
+        // This prevents creating phantom blocks
+        if self.canonical_block_by_hash(new_head_hash)?.is_none() {
+            error!(
+                target: "engine::tree",
+                block_hash = ?new_head_hash,
+                block_number = new_head_number,
+                "Cannot update to canonical ancestor - block not found in storage"
+            );
+            return Err(ProviderError::HeaderNotFound(new_head_hash.into()));
+        }
+
+        // Only update tree state AFTER confirming the block exists
         self.state.tree_state.set_canonical_head(canonical_header.num_hash());
 
         // Handle the state update based on whether this is an unwind scenario
@@ -833,41 +845,58 @@ where
         let new_head_hash = canonical_header.hash();
         let new_head_number = canonical_header.number();
 
-        // Try to load the canonical ancestor's block
-        match self.canonical_block_by_hash(new_head_hash)? {
-            Some(executed_block) => {
-                let block_with_trie = ExecutedBlockWithTrieUpdates {
-                    block: executed_block,
-                    trie: ExecutedTrieUpdates::Missing,
-                };
+        // First check if the canonical ancestor is already in memory
+        // This can happen when the block was recently added but not yet persisted
+        let canonical_block = if let Some(_block_state) = self.canonical_in_memory_state.state_by_hash(new_head_hash) {
+            // Block is already in memory, no need to reload it
+            debug!(
+                target: "engine::tree",
+                block_number = new_head_number,
+                block_hash = ?new_head_hash,
+                "Canonical ancestor found in memory during reorg"
+            );
 
-                // Perform the reorg to properly handle the unwind
-                self.canonical_in_memory_state.update_chain(NewCanonicalChain::Reorg {
-                    new: vec![block_with_trie],
-                    old: old_blocks,
-                });
+            // Simply perform the reorg to remove old blocks and update the head
+            // The canonical block is already in memory so we don't need to add it again
+            self.canonical_in_memory_state
+                .update_chain(NewCanonicalChain::Reorg { new: vec![], old: old_blocks });
 
-                // CRITICAL: Update the canonical head after the reorg
-                // This ensures get_canonical_head() returns the correct block
-                self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
+            self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
 
-                debug!(
+            return Ok(());
+        } else {
+            // Block is not in memory, try to load from disk
+            self.canonical_block_by_hash(new_head_hash)?.ok_or_else(|| {
+                error!(
                     target: "engine::tree",
+                    block_hash = ?new_head_hash,
                     block_number = new_head_number,
-                    block_hash = ?new_head_hash,
-                    "Successfully loaded canonical ancestor into memory via reorg"
+                    "Canonical ancestor block not found in memory or on disk during reorg"
                 );
-            }
-            None => {
-                // Fallback: update header only if block cannot be found
-                warn!(
-                    target: "engine::tree",
-                    block_hash = ?new_head_hash,
-                    "Could not find canonical ancestor block, updating header only"
-                );
-                self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
-            }
-        }
+                ProviderError::HeaderNotFound(new_head_hash.into())
+            })?
+        };
+
+        // For blocks loaded from disk after persistence, we don't have trie updates available
+        // Mark them as missing to indicate they need to be computed if required
+        let block_with_trie = ExecutedBlockWithTrieUpdates {
+            block: canonical_block,
+            trie: ExecutedTrieUpdates::Missing,
+        };
+
+        // Perform the reorg with the canonical block
+        self.canonical_in_memory_state
+            .update_chain(NewCanonicalChain::Reorg { new: vec![block_with_trie], old: old_blocks });
+
+        // Update the canonical head after the reorg
+        self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
+
+        debug!(
+            target: "engine::tree",
+            block_number = new_head_number,
+            block_hash = ?new_head_hash,
+            "Successfully rewound to canonical ancestor (loaded from disk with missing trie updates)"
+        );
 
         Ok(())
     }
@@ -883,34 +912,15 @@ where
         // Update the canonical head header
         self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
 
-        // Load the block into memory if it's not already present
-        self.ensure_block_in_memory(new_head_number, new_head_hash)
-    }
-
-    /// Ensures a block is loaded into memory if not already present.
-    fn ensure_block_in_memory(&self, block_number: u64, block_hash: B256) -> ProviderResult<()> {
-        // Check if block is already in memory
-        if self.canonical_in_memory_state.state_by_number(block_number).is_some() {
-            return Ok(());
-        }
-
-        // Try to load the block from storage
-        if let Some(executed_block) = self.canonical_block_by_hash(block_hash)? {
-            let block_with_trie = ExecutedBlockWithTrieUpdates {
-                block: executed_block,
-                trie: ExecutedTrieUpdates::Missing,
-            };
-
-            self.canonical_in_memory_state
-                .update_chain(NewCanonicalChain::Commit { new: vec![block_with_trie] });
-
-            debug!(
-                target: "engine::tree",
-                block_number,
-                block_hash = ?block_hash,
-                "Added canonical block to in-memory state"
-            );
-        }
+        // For blocks that are already on disk, we don't need to add them to the
+        // in-memory state. They are already persisted with full trie data.
+        // Adding them with ExecutedTrieUpdates::Missing would create issues.
+        debug!(
+            target: "engine::tree",
+            block_number = new_head_number,
+            block_hash = ?new_head_hash,
+            "Updated canonical head (block available on disk)"
+        );
 
         Ok(())
     }

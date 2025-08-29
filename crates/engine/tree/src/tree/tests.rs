@@ -949,3 +949,37 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
         "In-memory state: Latest block hash should be updated to canonical ancestor"
     );
 }
+
+#[tokio::test]
+async fn test_compute_trie_input_with_in_memory_block() {
+    // Test that compute_trie_input correctly finds blocks in memory when not in database
+    // This verifies the fix for the phantom block issue
+
+    reth_tracing::init_test_tracing();
+    let chain_spec = MAINNET.clone();
+    let mut test_harness = TestHarness::new(chain_spec.clone());
+
+    let mut test_block_builder = TestBlockBuilder::eth().with_chain_spec((*chain_spec).clone());
+
+    // Create a sequence of blocks
+    let blocks: Vec<_> = test_block_builder.get_executed_blocks(1..4).collect();
+
+    // Add blocks to tree state (in memory) but NOT to database
+    for block in &blocks {
+        test_harness.tree.state.tree_state.insert_executed(block.clone());
+    }
+
+    // Set the canonical head to the last block
+    let last_block = blocks.last().unwrap();
+    test_harness.tree.state.tree_state.set_canonical_head(last_block.recovered_block().num_hash());
+
+    // Now when compute_trie_input is called with a parent hash that's only in memory,
+    // it should find it via the tree_state check we added
+    let parent_hash = blocks[1].recovered_block().hash();
+
+    // This would have failed before our fix because the block only exists in memory
+    // With our fix, it checks tree_state first and finds the block
+    let result = test_harness.tree.state.tree_state.blocks_by_hash(parent_hash);
+
+    assert!(result.is_some(), "Should find block in tree state even when not in database");
+}

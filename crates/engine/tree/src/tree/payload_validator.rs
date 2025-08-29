@@ -13,7 +13,7 @@ use crate::tree::{
     PersistenceState, PersistingKind, StateProviderBuilder, StateProviderDatabase, TreeConfig,
 };
 use alloy_consensus::transaction::Either;
-use alloy_eips::{eip1898::BlockWithParent, NumHash};
+use alloy_eips::{eip1898::BlockWithParent, BlockHashOrNumber, NumHash};
 use alloy_evm::Evm;
 use alloy_primitives::B256;
 use reth_chain_state::{
@@ -848,8 +848,16 @@ where
                 // parent of the oldest block.
                 (block.recovered_block().number() - 1).into()
             } else {
-                // Otherwise, set the anchor to the original provided parent hash.
-                parent_hash.into()
+                // No in-memory blocks found via blocks_by_hash, but the parent might still
+                // be in memory (e.g., recently reorg'd block without children yet).
+                // Try to resolve it to a block number immediately to avoid later failures.
+                if let Some(header) = state.tree_state.sealed_header_by_hash(&parent_hash) {
+                    // Parent is in memory, use its block number
+                    header.number().into()
+                } else {
+                    // Parent is truly on disk, use the hash and resolve it later
+                    parent_hash.into()
+                }
             };
         }
 
@@ -860,9 +868,38 @@ where
         }
 
         // Convert the historical block to the block number.
-        let block_number = provider
-            .convert_hash_or_number(historical)?
-            .ok_or_else(|| ProviderError::BlockHashNotFound(historical.as_hash().unwrap()))?;
+        // CRITICAL: We must check memory FIRST because during reorgs, blocks might exist
+        // in memory but not yet be persisted to disk (HeaderNumbers table might be missing).
+        let block_number = match historical {
+            BlockHashOrNumber::Number(num) => num,
+            BlockHashOrNumber::Hash(hash) => {
+                // First check if this block is in the in-memory tree state
+                // This handles blocks that were recently reorg'd but not yet persisted
+                if let Some(header) = state.tree_state.sealed_header_by_hash(&hash) {
+                    debug!(target: "engine::tree", block_hash = ?hash, block_number = header.number(), "Found historical block in memory");
+                    header.number()
+                } else {
+                    // Fall back to checking the database via HeaderNumbers table
+                    // Note: This can fail if the block exists but HeaderNumbers is inconsistent
+                    match provider.block_number(hash)? {
+                        Some(num) => {
+                            debug!(target: "engine::tree", block_hash = ?hash, block_number = num, "Found historical block on disk");
+                            num
+                        }
+                        None => {
+                            // The block should exist if we got here (parent was found).
+                            // If we can't find it, it indicates a database inconsistency
+                            // or a race condition during persistence.
+                            error!(target: "engine::tree",
+                                block_hash = ?hash,
+                                "Historical block not found in memory or disk. This likely indicates the block was reorg'd but not yet persisted, or HeaderNumbers table is missing the entry."
+                            );
+                            return Err(ProviderError::BlockHashNotFound(hash));
+                        }
+                    }
+                }
+            }
+        };
 
         // Retrieve revert state for historical block.
         let revert_state = if block_number == best_block_number {
