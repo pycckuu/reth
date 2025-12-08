@@ -1812,14 +1812,18 @@ where
         &self,
         hash: B256,
     ) -> ProviderResult<Option<SealedHeader<N::BlockHeader>>> {
-        // check memory first
-        let header = self.state.tree_state.sealed_header_by_hash(&hash);
-
-        if header.is_some() {
-            Ok(header)
-        } else {
-            self.provider.sealed_header_by_hash(hash)
+        // check tree_state memory first
+        if let Some(header) = self.state.tree_state.sealed_header_by_hash(&hash) {
+            return Ok(Some(header))
         }
+
+        // check canonical_in_memory_state (has blocks that may not be in TreeState)
+        if let Some(header) = self.canonical_in_memory_state.header_by_hash(hash) {
+            return Ok(Some(header))
+        }
+
+        // fall back to provider (database/static files)
+        self.provider.sealed_header_by_hash(hash)
     }
 
     /// Return the parent hash of the lowest buffered ancestor for the requested block, if there
