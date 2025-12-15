@@ -493,12 +493,14 @@ impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
-        // use latest state provider if the head state exists
-        if let Some(state) = self.canonical_in_memory_state.head_state() {
-            trace!(target: "providers::blockchain", "Using head state for latest state provider");
-            Ok(self.block_state_provider(&state)?.boxed())
+
+        // Use canonical head from FCU tracker (not highest-numbered block)
+        let canonical_head_hash = self.canonical_in_memory_state.get_canonical_head().hash();
+
+        if let Some(state) = self.canonical_in_memory_state.state_by_hash(canonical_head_hash) {
+            Ok(Box::new(self.block_state_provider(&state)?))
         } else {
-            trace!(target: "providers::blockchain", "Using database state for latest state provider");
+            trace!(target: "providers::blockchain", ?canonical_head_hash, "Canonical head not in memory, using database");
             self.database.latest()
         }
     }

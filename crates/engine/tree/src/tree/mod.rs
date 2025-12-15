@@ -1158,7 +1158,25 @@ where
             // forkchoiceState.headBlockHash, validationError: null}, payloadId: null}`
 
             // The head block is already canonical and we're not processing payload attributes,
-            // so we're not triggering a payload job and can return right away
+            // so we're not triggering a payload job and can return right away.
+            //
+            // However, if FCU is targeting a different block than current head (reorg scenario),
+            // we must update the canonical head so state providers use the correct chain state.
+            // This prevents "nonce too low" errors when transactions are resubmitted after reorg.
+            // This handles both:
+            // - Reorg to ancestor (lower block number)
+            // - Same-height reorg (same number, different hash)
+            let current_head = self.state.tree_state.canonical_head();
+            if canonical_header.num_hash() != *current_head {
+                debug!(
+                    target: "engine::tree",
+                    ?current_head,
+                    new_head = ?canonical_header.num_hash(),
+                    "FCU targets different canonical block, updating head for correct state lookups"
+                );
+                self.state.tree_state.set_canonical_head(canonical_header.num_hash());
+                self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
+            }
 
             let outcome = TreeOutcome::new(OnForkChoiceUpdated::valid(PayloadStatus::new(
                 PayloadStatusEnum::Valid,
