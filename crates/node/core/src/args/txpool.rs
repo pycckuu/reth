@@ -411,6 +411,19 @@ pub struct TxPoolArgs {
     /// Max batch size for transaction pool insertions
     #[arg(long = "txpool.max-batch-size", default_value_t = DefaultTxPoolValues::get_global().max_batch_size)]
     pub max_batch_size: usize,
+
+    /// Enable FIFO ordering for transactions.
+    ///
+    /// When enabled, transactions are processed in the order they were received
+    /// rather than being prioritized by gas price. This is useful for:
+    /// - Private networks where gas price competition is not desired
+    /// - Testing scenarios requiring deterministic transaction ordering
+    /// - Applications requiring fairness guarantees
+    ///
+    /// Not recommended for public Ethereum networks where MEV considerations
+    /// and transaction fee markets are important.
+    #[arg(long = "txpool.fifo-ordering", default_value_t = false)]
+    pub fifo_ordering: bool,
 }
 
 impl TxPoolArgs {
@@ -496,6 +509,7 @@ impl Default for TxPoolArgs {
             transactions_backup_path,
             disable_transactions_backup,
             max_batch_size,
+            fifo_ordering: false,
         }
     }
 }
@@ -540,6 +554,7 @@ impl RethTransactionPoolConfig for TxPoolArgs {
             max_new_pending_txs_notifications: self.max_new_pending_txs_notifications,
             max_queued_lifetime: self.max_queued_lifetime,
             max_inflight_delegated_slot_limit: default_config.max_inflight_delegated_slot_limit,
+            fifo_ordering: self.fifo_ordering,
         }
     }
 
