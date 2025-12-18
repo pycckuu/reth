@@ -30,6 +30,7 @@ reth-prune.workspace = true
 reth-revm.workspace = true
 reth-stages-api.workspace = true
 reth-tasks.workspace = true
+reth-transaction-pool.workspace = true
 reth-trie-parallel.workspace = true
 reth-trie-sparse = { workspace = true, features = ["std", "metrics"] }
 reth-trie-sparse-parallel = { workspace = true, features = ["std"] }
